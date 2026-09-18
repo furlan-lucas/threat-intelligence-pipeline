@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+stix_output.json
 # C extensions
 *.so
 
