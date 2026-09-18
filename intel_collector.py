@@ -7,6 +7,11 @@ import requests
 # Import load_dotenv so Python can read values from the local .env file.
 from dotenv import load_dotenv
 
+# Import stix2 so Python can detect patterns
+from stix2 import Bundle, Indicator, Malware, Relationship
+
+# Import datetime for timestamps conversions
+from datetime import datetime, timezone
 
 # Load variables from .env into the current Python environment.
 # This lets us use os.getenv() without hardcoding API keys in this file.
@@ -27,7 +32,7 @@ if not all([VT_API_KEY, OTX_API_KEY, URLHAUS_AUTH_KEY]):
 
 # This URLHaus endpoint returns 10 recently reported malware-delivery URLs.
 URLHAUS_RECENT_URLS = (
-    "https://urlhaus-api.abuse.ch/v1/urls/recent/limit/10/"
+    "https://urlhaus-api.abuse.ch/v1/urls/recent/limit/30/"
 )
 
 
@@ -77,7 +82,7 @@ for record in online_urls[:3]:
 # This separate URLHaus endpoint returns recent malware payload metadata.
 # It provides hashes and file types without downloading malware samples.
 URLHAUS_RECENT_PAYLOADS = (
-    "https://urlhaus-api.abuse.ch/v1/payloads/recent/limit/10/"
+    "https://urlhaus-api.abuse.ch/v1/payloads/recent/limit/30/"
 )
 
 
@@ -186,3 +191,61 @@ else:
     print(f"Suspicious detections: {vt_stats.get('suspicious', 0)}")
     print(f"Undetected: {vt_stats.get('undetected', 0)}")
     print(f"Detection ratio: {flagged_engines}/{total_engines}")
+
+# Use the URLHaus malware label when available.
+# Otherwise use a transparent placeholder instead of guessing a family name.
+malware_name = selected_payload.get("signature") or "Unknown malware"
+
+# URLHaus returns a date like: 2026-09-18 22:34:44
+# Convert it into the timestamp format STIX requires.
+urlhaus_firstseen = selected_payload["firstseen"]
+
+valid_from = datetime.strptime(
+    urlhaus_firstseen,
+    "%Y-%m-%d %H:%M:%S",
+).replace(tzinfo=timezone.utc)
+
+
+# Create an Indicator that defenders can use to match the SHA-256 hash.
+hash_indicator = Indicator(
+    name=f"Malicious file hash: {sample_hash}",
+    pattern=f"[file:hashes.'SHA-256' = '{sample_hash}']",
+    pattern_type="stix",
+    valid_from=valid_from,
+    description=(
+        "SHA-256 hash observed in the URLHaus recent payload feed."
+    ),
+)
+
+# Create a STIX object describing the malware payload.
+malware = Malware(
+    name=malware_name,
+    is_family=False,
+    description=(
+        f"URLHaus-reported payload with file type: "
+        f"{selected_payload.get('file_type', 'unknown')}."
+    ),
+)
+
+# Link the file-hash indicator to the malware object.
+indicator_relationship = Relationship(
+    relationship_type="indicates",
+    source_ref=hash_indicator.id,
+    target_ref=malware.id,
+    description="The file-hash indicator identifies this malware payload.",
+)
+
+# Combine the objects into one valid STIX bundle.
+stix_bundle = Bundle(
+    objects=[
+        hash_indicator,
+        malware,
+        indicator_relationship,
+    ]
+)
+
+# Save structured threat intelligence to a local JSON file.
+with open("stix_output.json", "w", encoding="utf-8") as output_file:
+    output_file.write(stix_bundle.serialize(pretty=True))
+
+print("\nSTIX output saved to stix_output.json")
